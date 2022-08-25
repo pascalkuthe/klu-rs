@@ -1,0 +1,21 @@
+[package]
+name = "klu-rs"
+description = "Save bindings to SuiteSparse's KLU sparse matrix solver"
+version = "0.2.0"
+license = "Apache-2.0"
+readme = "README.md"
+authors = ["Pascal Kuthe <pascal.kuthe@semimod.de>"]
+edition = "2021"
+repository = "https://github.com/pascalkuthe/klu-rs"
+keywords = ["sparse", "cholesky", "factorization", "suitesparse", "binding"]
+
+[dependencies]
+num-complex = "0.4"
+klu_sys = {version="0.2.0",path="../klu-sys"}
+
+[dev-dependencies]
+proptest = "1.0"
+float-cmp = "0.9"
+
+[features]
+dynamic = ["klu_sys/dynamic"]

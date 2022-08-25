@@ -1,0 +1,9 @@
+[workspace]
+
+members = [
+    "klu-sys",
+    "klu",
+]
+
+[profile.dev.package.klu_sys]
+opt-level = 3
