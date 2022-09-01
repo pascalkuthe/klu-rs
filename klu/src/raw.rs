@@ -1,10 +1,10 @@
 use klu_sys::{
     klu_analyze, klu_defaults, klu_factor, klu_free_numeric, klu_free_symbolic, klu_l_analyze,
     klu_l_defaults, klu_l_factor, klu_l_free_numeric, klu_l_free_symbolic, klu_l_rcond,
-    klu_l_refactor, klu_l_solve, klu_rcond, klu_refactor, klu_solve, klu_z_factor,
-    klu_z_free_numeric, klu_z_rcond, klu_z_refactor, klu_z_solve, klu_zl_factor,
-    klu_zl_free_numeric, klu_zl_rcond, klu_zl_refactor, klu_zl_solve, KluCommon, KluLCommon,
-    KluLNumeric, KluLSymbolic, KluNumeric, KluSymbolic,
+    klu_l_refactor, klu_l_solve, klu_l_tsolve, klu_rcond, klu_refactor, klu_solve, klu_tsolve,
+    klu_z_factor, klu_z_free_numeric, klu_z_rcond, klu_z_refactor, klu_z_solve, klu_z_tsolve,
+    klu_zl_factor, klu_zl_free_numeric, klu_zl_rcond, klu_zl_refactor, klu_zl_solve, klu_zl_tsolve,
+    KluCommon, KluLCommon, KluLNumeric, KluLSymbolic, KluNumeric, KluSymbolic,
 };
 use num_complex::{Complex64, ComplexFloat};
 
@@ -22,6 +22,9 @@ mod sealed {
     impl Sealed for i64 {}
 }
 
+/// Values that can be used by the KLU solver.
+/// The functions of this trait are all unsafe because they directly call the underlying C implementation.
+#[allow(clippy::missing_safety_doc)]
 pub trait KluData:
     Sealed
     + Copy
@@ -36,6 +39,15 @@ pub trait KluData:
     + ComplexFloat<Real = f64>
 {
     unsafe fn klu_solve<I: KluIndex>(
+        symbolic: *mut I::KluSymbolic,
+        numeric: *mut I::KluNumeric,
+        rhs_dimension: I,
+        number_rhs: I,
+        rhs_data: *mut Self,
+        common: *mut I::KluCommon,
+    ) -> bool;
+
+    unsafe fn klu_tsolve<I: KluIndex>(
         symbolic: *mut I::KluSymbolic,
         numeric: *mut I::KluNumeric,
         rhs_dimension: I,
@@ -73,7 +85,12 @@ pub trait KluData:
     ) -> bool;
 }
 
-pub trait KluIndex: PartialEq + PartialOrd + Ord + Debug + Copy + Clone + Eq + Sealed {
+/// Values that can be used by the KLU solver.
+/// The functions of this trait are all unsafe because they directly call the underlying C implementation.
+#[allow(clippy::missing_safety_doc)]
+pub trait KluIndex:
+    PartialEq + PartialOrd + Ord + Debug + Copy + Clone + Eq + Sealed + Add<Output = Self>
+{
     type KluCommon: Debug;
     type KluNumeric: Debug;
     type KluSymbolic: Debug;
@@ -138,7 +155,25 @@ pub trait KluIndex: PartialEq + PartialOrd + Ord + Debug + Copy + Clone + Eq + S
         common: *mut Self::KluCommon,
     ) -> bool;
 
+    unsafe fn klu_tsolve(
+        symbolic: *mut Self::KluSymbolic,
+        numeric: *mut Self::KluNumeric,
+        rhs_dimension: Self,
+        number_rhs: Self,
+        rhs_data: *mut f64,
+        common: *mut Self::KluCommon,
+    ) -> bool;
+
     unsafe fn klu_z_solve(
+        symbolic: *mut Self::KluSymbolic,
+        numeric: *mut Self::KluNumeric,
+        rhs_dimension: Self,
+        number_rhs: Self,
+        rhs_data: *mut f64,
+        common: *mut Self::KluCommon,
+    ) -> bool;
+
+    unsafe fn klu_z_tsolve(
         symbolic: *mut Self::KluSymbolic,
         numeric: *mut Self::KluNumeric,
         rhs_dimension: Self,
@@ -178,6 +213,24 @@ impl KluData for f64 {
         common: *mut <I as KluIndex>::KluCommon,
     ) -> bool {
         I::klu_solve(
+            symbolic,
+            numeric,
+            rhs_dimension,
+            number_rhs,
+            rhs_data,
+            common,
+        )
+    }
+
+    unsafe fn klu_tsolve<I: KluIndex>(
+        symbolic: *mut I::KluSymbolic,
+        numeric: *mut I::KluNumeric,
+        rhs_dimension: I,
+        number_rhs: I,
+        rhs_data: *mut Self,
+        common: *mut I::KluCommon,
+    ) -> bool {
+        I::klu_tsolve(
             symbolic,
             numeric,
             rhs_dimension,
@@ -234,6 +287,24 @@ impl KluData for Complex64 {
         common: *mut <I as KluIndex>::KluCommon,
     ) -> bool {
         I::klu_z_solve(
+            symbolic,
+            numeric,
+            rhs_dimension,
+            number_rhs,
+            rhs_data as *mut f64,
+            common,
+        )
+    }
+
+    unsafe fn klu_tsolve<I: KluIndex>(
+        symbolic: *mut I::KluSymbolic,
+        numeric: *mut I::KluNumeric,
+        rhs_dimension: I,
+        number_rhs: I,
+        rhs_data: *mut Self,
+        common: *mut I::KluCommon,
+    ) -> bool {
+        I::klu_z_tsolve(
             symbolic,
             numeric,
             rhs_dimension,
@@ -421,6 +492,24 @@ impl KluIndex for i32 {
         ) != 0
     }
 
+    unsafe fn klu_tsolve(
+        symbolic: *mut Self::KluSymbolic,
+        numeric: *mut Self::KluNumeric,
+        rhs_dimension: Self,
+        number_rhs: Self,
+        rhs_data: *mut f64,
+        common: *mut Self::KluCommon,
+    ) -> bool {
+        klu_tsolve(
+            symbolic,
+            numeric,
+            rhs_dimension,
+            number_rhs,
+            rhs_data,
+            common,
+        ) != 0
+    }
+
     unsafe fn klu_z_solve(
         symbolic: *mut Self::KluSymbolic,
         numeric: *mut Self::KluNumeric,
@@ -435,6 +524,25 @@ impl KluIndex for i32 {
             rhs_dimension,
             number_rhs,
             rhs_data,
+            common,
+        ) != 0
+    }
+
+    unsafe fn klu_z_tsolve(
+        symbolic: *mut Self::KluSymbolic,
+        numeric: *mut Self::KluNumeric,
+        rhs_dimension: Self,
+        number_rhs: Self,
+        rhs_data: *mut f64,
+        common: *mut Self::KluCommon,
+    ) -> bool {
+        klu_z_tsolve(
+            symbolic,
+            numeric,
+            rhs_dimension,
+            number_rhs,
+            rhs_data,
+            0,
             common,
         ) != 0
     }
@@ -620,6 +728,24 @@ impl KluIndex for i64 {
         ) != 0
     }
 
+    unsafe fn klu_tsolve(
+        symbolic: *mut Self::KluSymbolic,
+        numeric: *mut Self::KluNumeric,
+        rhs_dimension: Self,
+        number_rhs: Self,
+        rhs_data: *mut f64,
+        common: *mut Self::KluCommon,
+    ) -> bool {
+        klu_l_tsolve(
+            symbolic,
+            numeric,
+            rhs_dimension,
+            number_rhs,
+            rhs_data,
+            common,
+        ) != 0
+    }
+
     unsafe fn klu_z_solve(
         symbolic: *mut Self::KluSymbolic,
         numeric: *mut Self::KluNumeric,
@@ -634,6 +760,25 @@ impl KluIndex for i64 {
             rhs_dimension,
             number_rhs,
             rhs_data,
+            common,
+        ) != 0
+    }
+
+    unsafe fn klu_z_tsolve(
+        symbolic: *mut Self::KluSymbolic,
+        numeric: *mut Self::KluNumeric,
+        rhs_dimension: Self,
+        number_rhs: Self,
+        rhs_data: *mut f64,
+        common: *mut Self::KluCommon,
+    ) -> bool {
+        klu_zl_tsolve(
+            symbolic,
+            numeric,
+            rhs_dimension,
+            number_rhs,
+            rhs_data,
+            0,
             common,
         ) != 0
     }

@@ -1,6 +1,7 @@
 use std::alloc::Layout;
 use std::cell::Cell;
 use std::marker::PhantomData;
+use std::mem;
 use std::ops::Index;
 use std::ptr::{self, NonNull};
 use std::rc::Rc;
@@ -52,26 +53,44 @@ impl<I: KluIndex> Default for KluSettings<I> {
 
 /// A compressed column form SparsMatrix whose shape is fixed
 pub struct FixedKluMatrix<I: KluIndex, D: KluData> {
-    pub spec: Rc<KluMatrixSpec<I>>,
+    spec: Rc<KluMatrixSpec<I>>,
     data: NonNull<[Cell<D>]>,
     klu_numeric: Option<NonNull<I::KluNumeric>>,
 }
 
 impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
-    /// Constructs a new matrix for the provided [`KluMatrixSpec<I>`] by allocating space where the
-    /// data can be stored
+    /// Obtain the allocation of the matrix data
+    /// This function can be used with [`from_raw`] and [`KluMatrixSpec::reinit`] to reuse a matrix
+    /// allocation.
+    ///
+    /// # Safety
+    ///
+    /// This function invalidates any pointers into the matrix
+    pub fn into_alloc(mut self) -> Vec<Cell<D>> {
+        let klu_numeric = self.klu_numeric.take();
+        self.free_numeric(klu_numeric);
+        // # SAFETY: This is save because data is always constructed from a box
+        unsafe { Box::from_raw(self.data.as_ptr()) }.into()
+    }
+
+    /// Constructs a new matrix for the provided [`KluMatrixSpec<I>`].
+    /// `alloc` is used to store the data. If not enough space is available `alloc` is resized as
+    /// required.
+    ///
+    /// The matrix is always intially filled with zeros no matter the previous content of `alloc`
     ///
     /// # Returns
     ///
     /// the constructed matrix if the matrix is not empty.
     /// If the matrix is empty `None` is retruned instead
-    pub fn new(spec: Rc<KluMatrixSpec<I>>) -> Option<Self> {
+    pub fn new_with_alloc(spec: Rc<KluMatrixSpec<I>>, mut alloc: Vec<Cell<D>>) -> Option<Self> {
         if spec.row_indices.is_empty() {
             return None;
         }
 
-        let data = vec![Cell::new(D::default()); spec.row_indices.len()];
-        let data = Box::into_raw(data.into_boxed_slice());
+        alloc.fill(Cell::new(D::default()));
+        alloc.resize(spec.row_indices.len(), Cell::new(D::default()));
+        let data = Box::into_raw(alloc.into_boxed_slice());
         let data = NonNull::new(data).expect("Box::into_raw never returns null");
 
         Some(Self {
@@ -79,6 +98,19 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
             data,
             klu_numeric: None,
         })
+    }
+
+    /// Constructs a new matrix for the provided [`KluMatrixSpec<I>`] by allocating space where the
+    /// data can be stored.
+    ///
+    /// The matrix is intially filled with zeros.
+    ///
+    /// # Returns
+    ///
+    /// the constructed matrix if the matrix is not empty.
+    /// If the matrix is empty `None` is retruned instead
+    pub fn new(spec: Rc<KluMatrixSpec<I>>) -> Option<Self> {
+        Self::new_with_alloc(spec, Vec::new())
     }
 
     pub fn data(&self) -> &[Cell<D>] {
@@ -170,7 +202,7 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
     }
 
     /// solves the linear system `Ax=b`. The `b` vector is read from `rhs` at the beginning of the
-    /// function. After the functin completes `x` was written into `x`
+    /// function. After the functin completes `x` was written into `rhs`
     ///
     /// **Note**: This function assumes that [`lu_factorize`] was called first.
     /// If this is not the case this functions panics.
@@ -195,6 +227,44 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
 
         assert!(res, "KLU produced unkown error");
     }
+
+    /// solves the linear system `A^T x=b` The `b` vector is read from `rhs` at the beginning of the
+    /// function. After the functin completes `x` was written into `rhs`
+    ///
+    /// **Note**: This function assumes that [`lu_factorize`] was called first.
+    /// If this is not the case this functions panics.
+    pub fn solve_linear_tranose_system(&self, rhs: &mut [D]) {
+        // TODO allow solving multiple rhs
+
+        let klu_numeric = self
+            .klu_numeric
+            .expect("factorize must be called before solve");
+        let res = unsafe {
+            D::klu_tsolve::<I>(
+                self.spec.klu_symbolic.as_ptr(),
+                klu_numeric.as_ptr(),
+                I::from_usize(rhs.len()),
+                I::from_usize(1),
+                rhs.as_mut_ptr(),
+                self.spec.settings.as_ffi(),
+            )
+        };
+
+        self.spec.settings.check_status();
+
+        assert!(res, "KLU produced unkown error");
+    }
+    fn free_numeric(&self, klu_numeric: Option<NonNull<I::KluNumeric>>) {
+        if let Some(klu_numeric) = klu_numeric {
+            unsafe {
+                D::klu_free_numeric::<I>(&mut klu_numeric.as_ptr(), self.spec.settings.as_ffi())
+            }
+        }
+    }
+    pub fn get(&self, column: I, row: I) -> Option<&Cell<D>> {
+        let offset = self.spec.offset(column, row)?;
+        Some(&self[offset])
+    }
 }
 
 impl<I: KluIndex, D: KluData> Index<usize> for FixedKluMatrix<I, D> {
@@ -209,18 +279,14 @@ impl<I: KluIndex, D: KluData> Index<(I, I)> for FixedKluMatrix<I, D> {
     type Output = Cell<D>;
 
     fn index(&self, (column, row): (I, I)) -> &Self::Output {
-        let offset = self.spec.offset(column, row);
-        &self[offset]
+        self.get(column, row).unwrap()
     }
 }
 
 impl<I: KluIndex, D: KluData> Drop for FixedKluMatrix<I, D> {
     fn drop(&mut self) {
-        if let Some(klu_numeric) = self.klu_numeric.take() {
-            unsafe {
-                D::klu_free_numeric::<I>(&mut klu_numeric.as_ptr(), self.spec.settings.as_ffi())
-            }
-        }
+        let klu_numeric = self.klu_numeric.take();
+        self.free_numeric(klu_numeric);
 
         unsafe {
             Box::from_raw(self.data.as_ptr());
@@ -242,8 +308,19 @@ impl<I: KluIndex> KluMatrixSpec<I> {
         self.row_indices.len()
     }
 
-    pub fn new(columns: &[Vec<I>], klu_settings: KluSettings<I>) -> Rc<Self> {
-        let mut column_offsets = Vec::with_capacity(columns.len() + 1);
+    /// Constructs a new matrix specification by reusing the allocations within this spec.
+    /// See [`new`] for details
+    pub fn reinit(&mut self, columns: &[Vec<I>]) {
+        self.free_symbolic();
+        self.init(columns)
+    }
+
+    fn init(&mut self, columns: &[Vec<I>]) {
+        let mut column_offsets: Vec<_> =
+            mem::replace(&mut self.column_offsets, Box::new([])).into();
+        column_offsets.clear();
+
+        column_offsets.reserve(columns.len() + 1);
         column_offsets.push(I::from_usize(0));
         let mut num_entries = 0;
         column_offsets.extend(columns.iter().map(|colum| {
@@ -252,8 +329,9 @@ impl<I: KluIndex> KluMatrixSpec<I> {
         }));
 
         let num_cols = I::from_usize(columns.len());
-        let mut column_offsets = column_offsets.into_boxed_slice();
-        let mut row_indices = Vec::with_capacity(num_entries);
+        let mut row_indices: Vec<_> = mem::replace(&mut self.row_indices, Box::new([])).into();
+        row_indices.clear();
+        row_indices.reserve(num_entries);
 
         for colmun in columns {
             row_indices.extend_from_slice(colmun)
@@ -264,19 +342,27 @@ impl<I: KluIndex> KluMatrixSpec<I> {
                 num_cols,
                 column_offsets.as_mut_ptr(),
                 row_indices.as_mut_ptr(),
-                klu_settings.as_ffi(),
+                self.settings.as_ffi(),
             )
         };
 
-        klu_settings.check_status();
+        self.settings.check_status();
+        self.klu_symbolic = NonNull::new(klu_symbolic)
+            .expect("klu_analyze returns a non null pointer if the status is ok");
+        self.column_offsets = column_offsets.into_boxed_slice();
+        self.row_indices = row_indices.into_boxed_slice();
+    }
 
-        let res = Self {
-            column_offsets,
-            row_indices: row_indices.into_boxed_slice(),
-            klu_symbolic: NonNull::new(klu_symbolic).unwrap(),
+    /// Constructs a new matrix spec from a column sparse matrix description.
+    pub fn new(columns: &[Vec<I>], klu_settings: KluSettings<I>) -> Rc<Self> {
+        let mut res = Self {
+            column_offsets: Box::new([]),
+            row_indices: Box::new([]),
+            klu_symbolic: NonNull::dangling(),
             settings: klu_settings,
             pd: PhantomData,
         };
+        res.init(columns);
         Rc::new(res)
     }
 
@@ -284,7 +370,7 @@ impl<I: KluIndex> KluMatrixSpec<I> {
         FixedKluMatrix::new(self)
     }
 
-    pub fn offset(&self, column: I, row: I) -> usize {
+    pub fn offset(&self, column: I, row: I) -> Option<usize> {
         let column = column.into_usize();
         let end = self.column_offsets[column + 1].into_usize();
 
@@ -292,31 +378,52 @@ impl<I: KluIndex> KluMatrixSpec<I> {
 
         let pos = self.row_indices[column_offset..end]
             .iter()
-            .position(|&r| r == row)
-            .unwrap();
-        column_offset + pos
+            .position(|&r| r == row)?;
+        Some(column_offset + pos)
+    }
+
+    fn free_symbolic(&self) {
+        unsafe { I::klu_free_symbolic(&mut self.klu_symbolic.as_ptr(), self.settings.as_ffi()) }
     }
 }
 
 impl<I: KluIndex> Drop for KluMatrixSpec<I> {
     fn drop(&mut self) {
-        unsafe { I::klu_free_symbolic(&mut self.klu_symbolic.as_ptr(), self.settings.as_ffi()) }
+        self.free_symbolic()
     }
 }
 
-pub struct KluMatrixBuilder<I: KluIndex>(Vec<Vec<I>>);
+pub struct KluMatrixBuilder<I: KluIndex> {
+    columns: Vec<Vec<I>>,
+    dim: I,
+}
 
 impl<I: KluIndex> KluMatrixBuilder<I> {
+    pub fn reset(&mut self, dim: I) {
+        self.ensure_dim(dim);
+        for column in &mut self.columns {
+            column.clear();
+        }
+    }
+
     pub fn new(dim: I) -> Self {
-        Self(vec![Vec::with_capacity(64); dim.into_usize()])
+        Self {
+            columns: vec![Vec::with_capacity(64); dim.into_usize()],
+            dim,
+        }
+    }
+
+    fn ensure_dim(&mut self, dim: I) {
+        if self.dim < dim {
+            self.columns
+                .resize_with(dim.into_usize(), || Vec::with_capacity(64));
+            self.dim = dim;
+        }
     }
 
     pub fn add_entry(&mut self, column: I, row: I) {
-        if self.0.len() < column.into_usize() {
-            self.0
-                .resize_with(column.into_usize(), || Vec::with_capacity(64))
-        }
-        let column = &mut self.0[column.into_usize()];
+        self.ensure_dim(column + I::from_usize(1));
+        let column = &mut self.columns[column.into_usize()];
         // Keep  the set unique and sorted (the latter is not necessary but makes insert fast and depending on KLU handles this be a nice property later)
         let dst = column.partition_point(|it| *it < row);
         if column.get(dst).map_or(true, |&it| it != row) {
@@ -324,7 +431,15 @@ impl<I: KluIndex> KluMatrixBuilder<I> {
         }
     }
 
-    pub fn finish(self, klu_settings: KluSettings<I>) -> Rc<KluMatrixSpec<I>> {
-        KluMatrixSpec::new(&self.0, klu_settings)
+    pub fn columns(&self) -> &[Vec<I>] {
+        &self.columns[..self.dim.into_usize()]
+    }
+
+    pub fn finish(&self, klu_settings: KluSettings<I>) -> Rc<KluMatrixSpec<I>> {
+        KluMatrixSpec::new(self.columns(), klu_settings)
+    }
+
+    pub fn reinit(&self, spec: &mut KluMatrixSpec<I>) {
+        spec.reinit(self.columns())
     }
 }
