@@ -54,7 +54,7 @@ impl<I: KluIndex> Default for KluSettings<I> {
 /// A compressed column form SparsMatrix whose shape is fixed
 pub struct FixedKluMatrix<I: KluIndex, D: KluData> {
     spec: Rc<KluMatrixSpec<I>>,
-    data: NonNull<[Cell<D>]>,
+    data: Option<NonNull<[Cell<D>]>>,
     klu_numeric: Option<NonNull<I::KluNumeric>>,
 }
 
@@ -70,7 +70,7 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
         let klu_numeric = self.klu_numeric.take();
         self.free_numeric(klu_numeric);
         // # SAFETY: This is save because data is always constructed from a box
-        unsafe { Box::from_raw(self.data.as_ptr()) }.into()
+        unsafe { Box::from_raw(self.data.take().unwrap().as_ptr()) }.into()
     }
 
     /// Constructs a new matrix for the provided [`KluMatrixSpec<I>`].
@@ -95,7 +95,7 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
 
         Some(Self {
             spec,
-            data,
+            data: Some(data),
             klu_numeric: None,
         })
     }
@@ -116,7 +116,7 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
     pub fn data(&self) -> &[Cell<D>] {
         // this is save because FrozenSparseMatrix makes the API guarantee that `self.data` is
         // always a valid owned pointer constructed from a `Box`
-        unsafe { self.data.as_ref() }
+        unsafe { self.data.unwrap().as_ref() }
     }
 
     /// Returns a pointer to the matrix data
@@ -133,7 +133,7 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
     }
 
     pub fn write_all(&self, val: D) {
-        unsafe { ptr::copy_nonoverlapping(&val, self.data_ptr(), self.data.len()) }
+        unsafe { ptr::copy_nonoverlapping(&val, self.data_ptr(), self.data.unwrap().len()) }
     }
 
     /// Perform lu_factorization of the matrix using KLU
@@ -288,8 +288,10 @@ impl<I: KluIndex, D: KluData> Drop for FixedKluMatrix<I, D> {
         let klu_numeric = self.klu_numeric.take();
         self.free_numeric(klu_numeric);
 
-        unsafe {
-            Box::from_raw(self.data.as_ptr());
+        if let Some(data) = self.data.take() {
+            unsafe {
+                Box::from_raw(data.as_ptr());
+            }
         }
     }
 }
