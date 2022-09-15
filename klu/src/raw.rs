@@ -37,6 +37,7 @@ pub trait KluData:
     + AddAssign
     + Div
     + ComplexFloat<Real = f64>
+    + 'static
 {
     unsafe fn klu_solve<I: KluIndex>(
         symbolic: *mut I::KluSymbolic,

@@ -3,7 +3,7 @@ use std::cell::Cell;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Index;
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 use std::rc::Rc;
 
 pub use raw::{KluData, KluIndex};
@@ -54,7 +54,7 @@ impl<I: KluIndex> Default for KluSettings<I> {
 /// A compressed column form SparsMatrix whose shape is fixed
 pub struct FixedKluMatrix<I: KluIndex, D: KluData> {
     spec: Rc<KluMatrixSpec<I>>,
-    data: Option<NonNull<[Cell<D>]>>,
+    data: Option<NonNull<[D]>>,
     klu_numeric: Option<NonNull<I::KluNumeric>>,
 }
 
@@ -66,11 +66,14 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
     /// # Safety
     ///
     /// This function invalidates any pointers into the matrix
-    pub fn into_alloc(mut self) -> Vec<Cell<D>> {
+    pub fn into_alloc(mut self) -> Vec<D> {
         let klu_numeric = self.klu_numeric.take();
         self.free_numeric(klu_numeric);
-        // # SAFETY: This is save because data is always constructed from a box
-        unsafe { Box::from_raw(self.data.take().unwrap().as_ptr()) }.into()
+        // # SAFETY: This is save because data was constructed from a leaked box
+        unsafe {
+            let data = self.data.take().unwrap().as_mut();
+            Box::from_raw(data).into()
+        }
     }
 
     /// Constructs a new matrix for the provided [`KluMatrixSpec<I>`].
@@ -83,19 +86,22 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
     ///
     /// the constructed matrix if the matrix is not empty.
     /// If the matrix is empty `None` is retruned instead
-    pub fn new_with_alloc(spec: Rc<KluMatrixSpec<I>>, mut alloc: Vec<Cell<D>>) -> Option<Self> {
+    pub fn new_with_alloc(spec: Rc<KluMatrixSpec<I>>, mut alloc: Vec<D>) -> Option<Self> {
         if spec.row_indices.is_empty() {
             return None;
         }
 
-        alloc.fill(Cell::new(D::default()));
-        alloc.resize(spec.row_indices.len(), Cell::new(D::default()));
-        let data = Box::into_raw(alloc.into_boxed_slice());
-        let data = NonNull::new(data).expect("Box::into_raw never returns null");
+        alloc.fill(D::default());
+        alloc.resize(spec.row_indices.len(), D::default());
+        // Safety: this is save because while data and alloc might alias they are raw pointers so this is allowed
+        // this construct might seem a bit odd because we are storing the same pointer twice
+        // The reason for this construct is that while *mut Cell<T> == *mut T holds true in theory, this is outside of rusts stability garuntees
+        // However
+        let data = Box::leak(alloc.into_boxed_slice());
 
         Some(Self {
             spec,
-            data: Some(data),
+            data: Some(data.into()),
             klu_numeric: None,
         })
     }
@@ -114,9 +120,8 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
     }
 
     pub fn data(&self) -> &[Cell<D>] {
-        // this is save because FrozenSparseMatrix makes the API guarantee that `self.data` is
-        // always a valid owned pointer constructed from a `Box`
-        unsafe { self.data.unwrap().as_ref() }
+        // # Safety self.data is constructed from a mutable pointer so there are no references to the data directly not constructed trough a cell
+        unsafe { &*(self.data.unwrap().as_ptr() as *const [Cell<D>]) }
     }
 
     /// Returns a pointer to the matrix data
@@ -129,11 +134,18 @@ impl<I: KluIndex, D: KluData> FixedKluMatrix<I, D> {
     /// This pointer point to data inside an `UnsafeCell` so you should use `std::ptr` methods to
     /// access it or turn it into `&Cell<D>` or `&UnsafeCell<D>`
     pub fn data_ptr(&self) -> *mut D {
-        self.data()[0].as_ptr()
+        self.data.unwrap().as_ptr() as *mut D
     }
 
     pub fn write_all(&self, val: D) {
-        unsafe { ptr::copy_nonoverlapping(&val, self.data_ptr(), self.data.unwrap().len()) }
+        for entry in self.data() {
+            entry.set(val)
+        }
+    }
+
+    pub fn write_zero(&self) {
+        // Safety: the sealed KLU data trait is only implemented for types (f64, Complex64) were byte zero is valid and equal to algebraic zero
+        unsafe { self.data_ptr().write_bytes(0, self.data().len()) }
     }
 
     /// Perform lu_factorization of the matrix using KLU
