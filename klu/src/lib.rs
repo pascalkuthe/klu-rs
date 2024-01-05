@@ -1,5 +1,5 @@
 use std::alloc::Layout;
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Index;
@@ -14,7 +14,7 @@ mod test;
 
 #[derive(Debug)]
 pub struct KluSettings<I: KluIndex> {
-    data: Box<I::KluCommon>,
+    data: UnsafeCell<NonNull<I::KluCommon>>,
 }
 
 impl<I: KluIndex> KluSettings<I> {
@@ -23,25 +23,35 @@ impl<I: KluIndex> KluSettings<I> {
             let raw = std::alloc::alloc(Layout::new::<I::KluCommon>()) as *mut I::KluCommon;
             I::klu_defaults(raw);
             Self {
-                data: Box::from_raw(raw),
+                data: NonNull::new_unchecked(raw).into(),
             }
         }
     }
 
     pub fn as_ffi(&self) -> *mut I::KluCommon {
-        self.data.as_ref() as *const I::KluCommon as *mut I::KluCommon
+        unsafe { (*self.data.get()).as_ptr() }
+    }
+
+    fn data_as_ref(&self) -> &I::KluCommon {
+        unsafe { (*self.data.get()).as_ref() }
     }
 
     pub fn check_status(&self) {
-        I::check_status(&self.data)
+        I::check_status(self.data_as_ref())
     }
 
     pub fn is_singular(&self) -> bool {
-        I::is_singular(&self.data)
+        I::is_singular(self.data_as_ref())
     }
 
     pub fn get_rcond(&self) -> f64 {
-        I::get_rcond(&self.data)
+        I::get_rcond(self.data_as_ref())
+    }
+}
+
+impl<I: KluIndex> Drop for KluSettings<I> {
+    fn drop(&mut self) {
+        unsafe { std::alloc::dealloc(self.as_ffi() as *mut u8, Layout::new::<I::KluCommon>()) }
     }
 }
 
@@ -302,7 +312,7 @@ impl<I: KluIndex, D: KluData> Drop for FixedKluMatrix<I, D> {
 
         if let Some(data) = self.data.take() {
             unsafe {
-                Box::from_raw(data.as_ptr());
+                drop(Box::from_raw(data.as_ptr()));
             }
         }
     }
