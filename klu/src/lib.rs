@@ -1,5 +1,5 @@
 use std::alloc::Layout;
-use std::cell::{Cell, UnsafeCell};
+use std::cell::Cell;
 use std::marker::PhantomData;
 use std::mem;
 use std::ops::Index;
@@ -14,7 +14,7 @@ mod test;
 
 #[derive(Debug)]
 pub struct KluSettings<I: KluIndex> {
-    data: UnsafeCell<NonNull<I::KluCommon>>,
+    data: NonNull<I::KluCommon>,
 }
 
 impl<I: KluIndex> KluSettings<I> {
@@ -23,29 +23,25 @@ impl<I: KluIndex> KluSettings<I> {
             let raw = std::alloc::alloc(Layout::new::<I::KluCommon>()) as *mut I::KluCommon;
             I::klu_defaults(raw);
             Self {
-                data: NonNull::new_unchecked(raw).into(),
+                data: NonNull::new_unchecked(raw),
             }
         }
     }
 
     pub fn as_ffi(&self) -> *mut I::KluCommon {
-        unsafe { (*self.data.get()).as_ptr() }
-    }
-
-    fn data_as_ref(&self) -> &I::KluCommon {
-        unsafe { (*self.data.get()).as_ref() }
+        self.data.as_ptr()
     }
 
     pub fn check_status(&self) {
-        I::check_status(self.data_as_ref())
+        I::check_status(unsafe { self.data.as_ref() })
     }
 
     pub fn is_singular(&self) -> bool {
-        I::is_singular(self.data_as_ref())
+        I::is_singular(unsafe { self.data.as_ref() })
     }
 
     pub fn get_rcond(&self) -> f64 {
-        I::get_rcond(self.data_as_ref())
+        I::get_rcond(unsafe { self.data.as_ref() })
     }
 }
 
